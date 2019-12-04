@@ -1,0 +1,8 @@
+
+.idea/
+
+cmake-build-debug/
+
+bin/
+
+3dsas.cpp
