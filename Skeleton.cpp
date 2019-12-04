@@ -33,15 +33,15 @@
 //=============================================================================================
 #include "framework.h"
 
+// source: http://cg.iit.bme.hu/portal/sites/default/files/oktatott%20t%C3%A1rgyak/sz%C3%A1m%C3%ADt%C3%B3g%C3%A9pes%20grafika/inkrement%C3%A1lis%203d%20k%C3%A9pszint%C3%A9zis/3dendzsinke.cpp
 
-GPUProgram gpuProgram;
 struct Material {
-    vec3 kd, ks, ka;
+    vec3 kd, ks;
     float shininess;
 };
 
 struct Light {
-    vec3 La, Le;
+    vec3 Le;
     vec4 wLightPos;
 
     void animate(float t) {	}
@@ -52,6 +52,7 @@ struct RenderState {
     Material *         material;
     std::vector<Light> lights;
     vec3	           wEye;
+    bool               animation;
 };
 
 class Shader : public GPUProgram {
@@ -61,44 +62,45 @@ public:
     void setUniformMaterial(const Material& material, const std::string& name) {
         setUniform(material.kd, name + ".kd");
         setUniform(material.ks, name + ".ks");
-        setUniform(material.ka, name + ".ka");
         setUniform(material.shininess, name + ".shininess");
     }
 
     void setUniformLight(const Light& light, const std::string& name) {
-        setUniform(light.La, name + ".La");
         setUniform(light.Le, name + ".Le");
         setUniform(light.wLightPos, name + ".wLightPos");
     }
 };
 
-//---------------------------
 class RouteShader : public Shader {
-    //---------------------------
     const char * vertexSource = R"(
 		#version 330
 		precision highp float;
 
 		struct Light {
-			vec3 La, Le;
+			vec3 Le;
 			vec4 wLightPos;
 		};
 
 		uniform mat4  MVP, M, Minv;
 		uniform Light[2] lights;
 		uniform vec3  wEye;
+        uniform bool animation;
 
 		layout(location = 0) in vec3  vtxPos;
 		layout(location = 1) in vec3  vtxNorm;
 
 		out vec3 wNormal;
 		out vec3 wView;
-		out vec3 wLight[8];
+		out vec3 wLight[2];
 
 		void main() {
-			gl_Position = vec4(vtxPos, 1) * MVP; // to NDC
-			// vectors for radiance computation
-			vec4 wPos = vec4(vtxPos, 1) * M;
+            vec3 vtxPos2 = vtxPos;
+            if (!animation)
+                vtxPos2.z = 0.1;
+
+			gl_Position = vec4(vtxPos2, 1) * MVP;
+
+			vec4 wPos = vec4(vtxPos2, 1) * M;
 			for(int i = 0; i < 2; i++) {
 				wLight[i] = lights[i].wLightPos.xyz * wPos.w - wPos.xyz * lights[i].wLightPos.w;
 			}
@@ -107,63 +109,63 @@ class RouteShader : public Shader {
 		}
 	)";
 
-    // fragment shader in GLSL
     const char * fragmentSource = R"(
 		#version 330
 		precision highp float;
 
 		struct Light {
-			vec3 La, Le;
+			vec3 Le;
 			vec4 wLightPos;
 		};
 
 		struct Material {
-			vec3 kd, ks, ka;
+			vec3 kd, ks;
 			float shininess;
 		};
 
 		uniform Material material;
-		uniform Light[8] lights;    // light sources
-		uniform int   nLights;
+		uniform Light[2] lights;
 
-		in  vec3 wNormal;       // interpolated world sp normal
-		in  vec3 wView;         // interpolated world sp view
-		in  vec3 wLight[2];     // interpolated world sp illum dir
+		in  vec3 wNormal;
+		in  vec3 wView;
+		in  vec3 wLight[2];
 
-        out vec4 fragmentColor; // output goes to frame buffer
+        out vec4 fragmentColor;
 
 		void main() {
 			vec3 N = normalize(wNormal);
 			vec3 V = normalize(wView);
-			if (dot(N, V) < 0) N = -N;	// prepare for one-sided surfaces like Mobius or Klein
-			vec3 texColor = texture(diffuseTexture, texcoord).rgb;
-			vec3 ka = material.ka * texColor;
-			vec3 kd = material.kd * texColor;
+			if (dot(N, V) < 0) N = -N;
+			vec3 kd = material.kd;
 
 			vec3 radiance = vec3(0, 0, 0);
-			for(int i = 0; i < nLights; i++) {
+			for(int i = 0; i < 2; i++) {
 				vec3 L = normalize(wLight[i]);
 				vec3 H = normalize(L + V);
 				float cost = max(dot(N,L), 0), cosd = max(dot(N,H), 0);
-				// kd and ka are modulated by the texture
-				radiance += ka * lights[i].La +
-                           (kd * texColor * cost + material.ks * pow(cosd, material.shininess)) * lights[i].Le;
+				radiance += (kd * cost + material.ks * pow(cosd, material.shininess)) * lights[i].Le;
 			}
 			fragmentColor = vec4(radiance, 1);
 		}
 	)";
 public:
-    RouteShader() { create(vertexSource, fragmentSource, "fragmentColor"); }
+    RouteShader() {
+        create(
+                vertexSource,
+                fragmentSource,
+                "fragmentColor"
+                );
+    }
 
     void Bind(RenderState state) {
-        Use(); 		// make this program run
+        Use();
         setUniform(state.MVP, "MVP");
         setUniform(state.M, "M");
         setUniform(state.Minv, "Minv");
         setUniform(state.wEye, "wEye");
         setUniformMaterial(*state.material, "material");
 
-        setUniform((int)state.lights.size(), "nLights");
+        setUniform(state.animation, "animation");
         for (unsigned int i = 0; i < state.lights.size(); i++) {
             setUniformLight(state.lights[i], std::string("lights[") + std::to_string(i) + std::string("]"));
         }
@@ -176,25 +178,32 @@ class TerrainShader : public Shader {
 		precision highp float;
 
 		struct Light {
-			vec3 La, Le;
+			vec3 Le;
 			vec4 wLightPos;
 		};
 
-		uniform mat4  MVP, M, Minv; // MVP, Model, Model-inverse
-		uniform Light[2] lights;    // light sources
-		uniform vec3  wEye;         // pos of eye
+		uniform mat4  MVP, M, Minv;
+		uniform Light[2] lights;
+		uniform vec3  wEye;
+        uniform bool animation;
 
-		layout(location = 0) in vec3  vtxPos;            // pos in modeling space
-		layout(location = 1) in vec3  vtxNorm;      	 // normal in modeling space
+		layout(location = 0) in vec3  vtxPos;
+		layout(location = 1) in vec3  vtxNorm;
 
-		out vec3 wNormal;		    // normal in world space
-		out vec3 wView;             // view in world space
-		out vec3 wLight[8];		    // light dir in world space
+		out vec3 wNormal;
+		out vec3 wView;
+		out vec3 wLight[2];
+        out float height;
 
 		void main() {
-			gl_Position = vec4(vtxPos, 1) * MVP; // to NDC
-			// vectors for radiance computation
-			vec4 wPos = vec4(vtxPos, 1) * M;
+            height = (vtxPos.z + 2) / 4;
+            vec3 vtxPos2 = vtxPos;
+            if (!animation)
+                vtxPos2.z = 0;
+
+			gl_Position = vec4(vtxPos2, 1) * MVP;
+
+			vec4 wPos = vec4(vtxPos2, 1) * M;
 			for(int i = 0; i < 2; i++) {
 				wLight[i] = lights[i].wLightPos.xyz * wPos.w - wPos.xyz * lights[i].wLightPos.w;
 			}
@@ -203,63 +212,68 @@ class TerrainShader : public Shader {
 		}
 	)";
 
-    // fragment shader in GLSL
     const char * fragmentSource = R"(
 		#version 330
 		precision highp float;
 
 		struct Light {
-			vec3 La, Le;
+			vec3 Le;
 			vec4 wLightPos;
 		};
 
 		struct Material {
-			vec3 kd, ks, ka;
+			vec3 kd, ks;
 			float shininess;
 		};
 
 		uniform Material material;
-		uniform Light[8] lights;    // light sources
-		uniform int   nLights;
+		uniform Light[2] lights;
 
-		in  vec3 wNormal;       // interpolated world sp normal
-		in  vec3 wView;         // interpolated world sp view
-		in  vec3 wLight[8];     // interpolated world sp illum dir
+        const vec3 green = vec3(0.105, 0.76, 0.286);
+        const vec3 brown = vec3(0.301, 0.1529, 0.1372);
 
-        out vec4 fragmentColor; // output goes to frame buffer
+		in  vec3 wNormal;
+		in  vec3 wView;
+		in  vec3 wLight[2];
+        in  float height;
+
+        out vec4 fragmentColor;
 
 		void main() {
 			vec3 N = normalize(wNormal);
 			vec3 V = normalize(wView);
-			if (dot(N, V) < 0) N = -N;	// prepare for one-sided surfaces like Mobius or Klein
-			vec3 texColor = texture(diffuseTexture, texcoord).rgb;
-			vec3 ka = material.ka * texColor;
-			vec3 kd = material.kd * texColor;
+            //if (dot(N, V) < 0) N = -N;
+
+			vec3 kd = material.kd * (green * (1 - height) + brown * height);
 
 			vec3 radiance = vec3(0, 0, 0);
-			for(int i = 0; i < nLights; i++) {
+			for(int i = 0; i < 2; i++) {
 				vec3 L = normalize(wLight[i]);
 				vec3 H = normalize(L + V);
 				float cost = max(dot(N,L), 0), cosd = max(dot(N,H), 0);
-				// kd and ka are modulated by the texture
-				radiance += ka * lights[i].La +
-                           (kd * texColor * cost + material.ks * pow(cosd, material.shininess)) * lights[i].Le;
+				radiance += (kd * cost + material.ks * pow(cosd, material.shininess)) * lights[i].Le;
 			}
 			fragmentColor = vec4(radiance, 1);
 		}
 	)";
 public:
-    TerrainShader() { create(vertexSource, fragmentSource, "fragmentColor"); }
+    TerrainShader() {
+        create(
+                vertexSource,
+                fragmentSource,
+                "fragmentColor"
+        );
+    }
 
     void Bind(RenderState state) {
-        Use(); 		// make this program run
+        Use();
         setUniform(state.MVP, "MVP");
         setUniform(state.M, "M");
         setUniform(state.Minv, "Minv");
         setUniform(state.wEye, "wEye");
+        setUniform(state.animation, "animation");
         setUniformMaterial(*state.material, "material");
 
-        setUniform((int)state.lights.size(), "nLights");
         for (unsigned int i = 0; i < state.lights.size(); i++) {
             setUniformLight(state.lights[i], std::string("lights[") + std::to_string(i) + std::string("]"));
         }
@@ -290,6 +304,7 @@ public:
 const int tessellationLevel = 50;
 
 class ParamSurface : public Geometry {
+protected:
     unsigned int nVtxPerStrip, nStrips;
 public:
     ParamSurface() { nVtxPerStrip = nStrips = 0; }
@@ -317,7 +332,8 @@ public:
 
     void draw() {
         glBindVertexArray(vao);
-        for (unsigned int i = 0; i < nStrips; i++) glDrawArrays(GL_TRIANGLE_STRIP, i *  nVtxPerStrip, nVtxPerStrip);
+        for (unsigned int i = 0; i < nStrips; i++)
+            glDrawArrays(GL_TRIANGLE_STRIP, i *  nVtxPerStrip, nVtxPerStrip);
     }
 };
 
@@ -327,28 +343,25 @@ public:
 
     VertexData genVertexData(float u, float v) {
         VertexData vd;
+        u *= 10;
+        v *= 10;
         vd.position = {u, v, h(u, v)};
         vd.normal = normal(u, v);
         return vd;
     }
 
     float h(float u, float v) {
-        u *= 10;
-        v *= 10;
-        float h = cosf(u-2-0.3*(v-2))+cosf(v-2+0.3*(u-2))- 0.1 *(abs(v-2)- abs(u-2));
+            float h = cosf(u-2-0.3*(v-2))
+                    + cosf(v-2+0.3*(u-2));
         return h;
     }
 
     vec3 normal(float u, float v) {
-        u *= 10;
-        v *= 10;
         vec3 normal;
-        normal.x =  -1 * (-sinf(u - 3 / 10 * (v - 2) - 2)
-                - (u - 2) / 10 / abs(u -2)
-                - 3 / 10 * sinf(3 / 10 * (u - 2) + v - 2));
-        normal.y = -1 * (-sinf(v - 3 / 10 * (u - 2) - 2)
-                   - (v - 2) / 10 / abs(v -2)
-                   - 3 / 10 * sinf(3 / 10 * (v - 2) + u - 2));
+        normal.x = -1 * (sinf(u - 0.3 * (v - 2) - 2)
+                + 0.3 * sinf(0.3 * (u - 2) + v - 2));
+        normal.y = -1 * (sinf(v + 0.3 * (u - 2) - 2)
+                + 0.3 * sinf(0.3 * (v - 2) - u + 2));
         normal.z = 1;
         return normalize(normal);
     }
@@ -365,9 +378,9 @@ class Route : public ParamSurface {
 
     int posCalculator(int pos) const {
         while (pos < 0)
-            pos += cps.size();
+            pos += cps.size() - 1;
         while (pos >= cps.size())
-            pos -= cps.size();
+            pos -= cps.size() - 1;
         return pos;
     }
 
@@ -375,19 +388,6 @@ class Route : public ParamSurface {
             const vec2 & p1, float t1, const vec2 & p2, float t2, const vec2 & p3, float t3, const vec2 & p4, float t4,
             float t
     ) const {
-        /*if (t1 > t2) {
-            t += 3600;
-            t2 += 3600;
-            t4 += 3600;
-            t3 += 3600;
-        }
-        if (t < t2)
-            t += 3600;
-        if (t3 < t2)
-            t3 += 3600;
-        if (t4 < t2)
-            t4 += 3600;*/
-
         vec2 v2 = v(p1, t1, p2, t2, p3, t3);
         vec2 v3 = v(p2, t2, p3, t3, p4, t4);
 
@@ -408,19 +408,6 @@ class Route : public ParamSurface {
             const vec2 & p1, float t1, const vec2 & p2, float t2, const vec2 & p3, float t3, const vec2 & p4, float t4,
             float t
     ) const {
-        /*if (t1 > t2) {
-            t += 3600;
-            t2 += 3600;
-            t4 += 3600;
-            t3 += 3600;
-        }
-        if (t < t2)
-            t += 3600;
-        if (t3 < t2)
-            t3 += 3600;
-        if (t4 < t2)
-            t4 += 3600;*/
-
         vec2 v2 = v(p1, t1, p2, t2, p3, t3);
         vec2 v3 = v(p2, t2, p3, t3, p4, t4);
 
@@ -435,40 +422,44 @@ class Route : public ParamSurface {
         return {3 * a3 * tt1 + 2 * a2 * tt0 + a1};
     }
 
-    vec2 r(float t) const {
+    vec2 r(float t) {
         if (cps.size() < 2)
             return {0, 0};
+        cps.push_back(cps[0]);
         int pos = t * (float)(cps.size() - 1);
-        return rHelper(
+        vec2 returnValue = rHelper(
                 cps[posCalculator(pos - 1)],
-                (pos - 1) / (cps.size() - 1),
+                ((float)pos - 1) / (float)(cps.size() - 1),
                 cps[posCalculator(pos)],
-                (pos) / (cps.size() - 1),
+                ((float)pos) / (float)(cps.size() - 1),
                 cps[posCalculator(pos + 1)],
-                (pos + 1) / (cps.size() - 1),
+                ((float)pos + 1) / (float)(cps.size() - 1),
                 cps[posCalculator(pos + 2)],
-                (pos + 2) / (cps.size() - 1),
+                ((float)pos + 2) / (float)(cps.size() - 1),
                 t
                 );
+        cps.pop_back();
+        return returnValue;
     }
 
-    vec2 rDerivative(float t) const {
+    vec2 rDerivative(float t) {
         if (cps.size() < 2)
             return {0, 0};
-        // t = [0, 1]
-        // 0 = 0, 1 = cps.size() - 1
+        cps.push_back(cps[0]);
         int pos = t * (float)(cps.size() - 1);
-        return rDerivativeHelper(
+        vec2 returnValue = rDerivativeHelper(
                 cps[posCalculator(pos - 1)],
-                (pos - 1) / (cps.size() - 1),
+                ((float)pos - 1) / (float)(cps.size() - 1),
                 cps[posCalculator(pos)],
-                (pos) / (cps.size() - 1),
+                ((float)pos) / (float)(cps.size() - 1),
                 cps[posCalculator(pos + 1)],
-                (pos + 1) / (cps.size() - 1),
+                ((float)pos + 1) / (float)(cps.size() - 1),
                 cps[posCalculator(pos + 2)],
-                (pos + 2) / (cps.size() - 1),
+                ((float)pos + 2) / (float)(cps.size() - 1),
                 t
         );
+        cps.pop_back();
+        return returnValue;
     }
 
     const float h0 = 0.05f;
@@ -539,6 +530,26 @@ public:
         vd.normal = normalize(biNormal(u) * YDerivative(v) - normal(u) * XDerivative(v));
         return vd;
     }
+
+    void draw() {
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+
+        int N = 10, M = 250;
+        nVtxPerStrip = (M + 1) * 2;
+        nStrips = N;
+        std::vector<VertexData> vtxData;
+        for (int i = 0; i < N; i++) {
+            for (int j = 0; j <= M; j++) {
+                vtxData.push_back(genVertexData((float) j / M, (float) i / N));
+                vtxData.push_back(genVertexData((float) j / M, (float) (i + 1) / N));
+            }
+        }
+        glBufferData(GL_ARRAY_BUFFER, nVtxPerStrip * nStrips * sizeof(VertexData), &vtxData[0], GL_STATIC_DRAW);
+
+        for (unsigned int i = 0; i < nStrips; i++)
+            glDrawArrays(GL_TRIANGLE_STRIP, i *  nVtxPerStrip, nVtxPerStrip);
+    }
 };
 
 struct Object {
@@ -569,7 +580,7 @@ public:
         geometry->draw();
     }
 
-    virtual void Animate(float tstart, float tend) {}
+    virtual void animate(float tstart, float tend) {}
 };
 
 struct Camera
@@ -622,46 +633,75 @@ class Scene {
     Camera * camera;
     bool animation = false;
     std::vector<Light> lights;
+    std::vector<Shader *> shaders;
+    std::vector<Material *> materials;
+    Terrain * terrain;
+    Route * route;
+
+    bool built = false;
 public:
     void build() {
-        Material * material0 = new Material;
-        material0->kd = vec3(0.6f, 0.4f, 0.2f);
-        material0->ks = vec3(4, 4, 4);
-        material0->ka = vec3(0.1f, 0.1f, 0.1f);
-        material0->shininess = 100;
+        shaders.push_back(new TerrainShader());
+        shaders.push_back(new RouteShader());
 
-        Material * material1 = new Material;
-        material1->kd = vec3(0.8f, 0.6f, 0.4f);
-        material1->ks = vec3(0.3f, 0.3f, 0.3f);
-        material1->ka = vec3(0.2f, 0.2f, 0.2f);
-        material1->shininess = 30;
+        materials.push_back(new Material);
+        materials[0]->kd = vec3(1, 1, 1);
+        materials[0]->ks = vec3(0.1, 0.1, 0.1);
+        materials[0]->shininess = 10;
 
-        camera->wEye = vec3(0, 0, 6);
-        camera->wLookat = vec3(0, 0, 0);
+        materials.push_back(new Material);
+        materials[1]->kd = vec3(0.14f, 0.16f, 0.13f);
+        materials[1]->ks = vec3(4.1f, 2.3f, 3.1f);
+        materials[1]->shininess = 100;
+
+        terrain = new Terrain();
+        route = new Route(*terrain);
+
+        Object * terrainObject = new Object(shaders[0], materials[0], terrain);
+        terrainObject->translation = vec3(-5, -5, 94);
+        objects.push_back(terrainObject);
+
+        Object * routeObject = new Object(shaders[1], materials[1], route);
+        routeObject->translation = vec3( 0, 0, 94);
+        objects.push_back(routeObject);
+
+        camera = new Camera(*route);
+
+        camera->wEye = vec3(0, 0, 100);
+        camera->wLookat = vec3(0, 0, 94);
         camera->wVup = vec3(0, 1, 0);
 
         lights.resize(2);
-        lights[0].wLightPos = vec4(5, 5, 4, 0);
-        lights[0].La = vec3(0.1f, 0.1f, 1);
-        lights[0].Le = vec3(3, 0, 0);
+        lights[0].wLightPos = vec4(-5, 5,  110, 0);
+        lights[0].Le = vec3(0.5, 0.5, 0.5);
 
-        lights[1].wLightPos = vec4(5, 10, 20, 0);
-        lights[1].La = vec3(0.2f, 0.2f, 0.2f);
-        lights[1].Le = vec3(0, 3, 0);
+        lights[1].wLightPos = vec4(5, -5, 110, 0);
+        lights[1].Le = vec3(0.5, 0.5, 0.5);
+
+        built = true;
     }
 
     ~Scene() {
-        delete camera;
-        for (int i = 0; i < objects.size(); ++i)
-            delete objects[i];
+        if (built) {
+            delete camera;
+            for (int i = 0; i < objects.size(); ++i)
+                delete objects[i];
+            for (int i = 0; i < shaders.size(); ++i)
+                delete shaders[i];
+            delete route;
+            delete terrain;
+            for (int i = 0; i < materials.size(); ++i)
+                delete materials[i];
+        }
     }
 
-    void Render() {
+    void render() {
         RenderState state;
         state.wEye = camera->wEye;
         state.V = camera->V();
         state.P = camera->P();
         state.lights = lights;
+        state.animation = false;
         for (Object * obj : objects)
             obj->draw(state);
     }
@@ -676,6 +716,11 @@ public:
         for (unsigned int i = 0; i < lights.size(); i++) {
             lights[i].animate(tend); }
     }
+
+    void addRoutePoint(vec2 && pt) {
+        printf("%f %f asas", pt.x, pt.y);
+        route->addControlPoint(pt);
+    }
 };
 
 Scene scene;
@@ -688,9 +733,9 @@ void onInitialization() {
 }
 
 void onDisplay() {
-    glClearColor(	0.529, 0.808, 0.98, 1.0f);
+    glClearColor(	0, 0, 0, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    scene.Render();
+    scene.render();
     glutSwapBuffers();
 }
 
@@ -709,7 +754,15 @@ void onMouseMotion(
 void onMouse(
         int button, int state, int pX, int pY
 ) {
+    float cX = 2.0f * pX / windowWidth - 1;
+    float cY = 1.0f - 2.0f * pY / windowHeight;
 
+    switch (button) {
+        case GLUT_LEFT_BUTTON:
+            if (state == GLUT_DOWN)
+                scene.addRoutePoint({cX * 5, cY * 5});
+            break;
+    }
 }
 
 void onIdle() {
