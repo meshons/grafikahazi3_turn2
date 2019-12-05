@@ -96,7 +96,7 @@ class RouteShader : public Shader {
 		void main() {
             vec3 vtxPos2 = vtxPos;
             if (!animation)
-                vtxPos2.z = 0.1;
+                vtxPos2.z = 0.02;
 
 			gl_Position = vec4(vtxPos2, 1) * MVP;
 
@@ -132,10 +132,14 @@ class RouteShader : public Shader {
 
         out vec4 fragmentColor;
 
+        vec3 Fresnel(vec3 F0, float cosTheta) {
+            return F0 + (vec3(1, 1, 1) - F0) * pow(cosTheta, 5);
+        }
+
 		void main() {
 			vec3 N = normalize(wNormal);
 			vec3 V = normalize(wView);
-			if (dot(N, V) < 0) N = -N;
+			//if (dot(N, V) < 0) N = -N;
 			vec3 kd = material.kd;
 
 			vec3 radiance = vec3(0, 0, 0);
@@ -143,7 +147,7 @@ class RouteShader : public Shader {
 				vec3 L = normalize(wLight[i]);
 				vec3 H = normalize(L + V);
 				float cost = max(dot(N,L), 0), cosd = max(dot(N,H), 0);
-				radiance += (kd * cost + material.ks * pow(cosd, material.shininess)) * lights[i].Le;
+				radiance += kd * lights[i].Le + (material.ks * pow(cosd, material.shininess)) * lights[i].Le;
 			}
 			fragmentColor = vec4(radiance, 1);
 		}
@@ -242,7 +246,6 @@ class TerrainShader : public Shader {
 		void main() {
 			vec3 N = normalize(wNormal);
 			vec3 V = normalize(wView);
-            //if (dot(N, V) < 0) N = -N;
 
 			vec3 kd = material.kd * (green * (1 - height) + brown * height);
 
@@ -351,17 +354,17 @@ public:
     }
 
     float h(float u, float v) {
-            float h = cosf(u-2-0.3*(v-2))
-                    + cosf(v-2+0.3*(u-2));
+        float h = cosf(-1 * u + 0.3f * v + 7.0f / 5.0f)
+                + cosf(0.3f * u + v - 13.0f / 5.0f);
         return h;
     }
 
     vec3 normal(float u, float v) {
         vec3 normal;
-        normal.x = -1 * (sinf(u - 0.3 * (v - 2) - 2)
-                + 0.3 * sinf(0.3 * (u - 2) + v - 2));
-        normal.y = -1 * (sinf(v + 0.3 * (u - 2) - 2)
-                + 0.3 * sinf(0.3 * (v - 2) - u + 2));
+        normal.x = (-1.0f * sinf(-1 * u - 0.3f * v + 7.0f / 5.0f)
+                + 0.3f * sinf(0.3f * u + v - 13.0f / 5.0f));
+        normal.y = (0.3f * sinf(-1 * u + 0.3f * v + 7.0f / 5.0f)
+                + sinf(0.3f * u + v - 13.0f / 5.0f));
         normal.z = 1;
         return normalize(normal);
     }
@@ -459,10 +462,11 @@ class Route : public ParamSurface {
                 t
         );
         cps.pop_back();
-        return returnValue;
+        return normalize(returnValue);
     }
 
-    const float h0 = 0.05f;
+    const float h0 = 0.01f;
+    const float r0 = 0.01f;
 
 public:
     vec3 s(float t) {
@@ -470,7 +474,7 @@ public:
         vec2 position2d = r(t);
         position.x = position2d.x;
         position.y = position2d.y;
-        position.z = terrain.h(position.x, position.y) + h0;
+        position.z = terrain.h(position.x + 5, position.y + 5) + h0;
         return position;;
     }
 
@@ -480,14 +484,14 @@ public:
         vec2 position = r(t);
         tangentVector.x = positionDerivative.x;
         tangentVector.y = positionDerivative.y;
-        vec3 terrainNormal = terrain.normal(position.x, position.y);
-        tangentVector.y = terrainNormal.x * positionDerivative.x + terrainNormal.y * positionDerivative.y;
+        vec3 terrainNormal = terrain.normal(position.x + 5, position.y + 5);
+        tangentVector.z = -1 * terrainNormal.x * positionDerivative.x + -1 * terrainNormal.y * positionDerivative.y;
         return normalize(tangentVector);
     }
 
     vec3 normal(float t) {
         vec2 position = r(t);
-        return normalize(terrain.normal(position.x, position.y));
+        return normalize(terrain.normal(position.x + 5, position.y + 5));
     }
 
     vec3 biNormal(float t) {
@@ -495,19 +499,11 @@ public:
     }
 
     float X(float v) {
-        return sinf(v * 2 * M_PI) * h0;
+        return sinf(v * 2 * (float)M_PI) * r0;
     }
 
     float Y(float v) {
-        return cosf(v * 2 * M_PI) * h0;
-    }
-
-    float XDerivative(float v) {
-        return 2 * M_PI * cosf(v * 2 * M_PI) * h0;
-    }
-
-    float YDerivative(float v) {
-        return -2 * M_PI * sinf(v * 2 * M_PI) * h0;
+        return cosf(v * 2 * (float)M_PI) * r0;
     }
 
 public:
@@ -527,7 +523,9 @@ public:
     VertexData genVertexData(float u, float v) {
         VertexData vd;
         vd.position = s(u) + p(u, v);
-        vd.normal = normalize(biNormal(u) * YDerivative(v) - normal(u) * XDerivative(v));
+        vd.normal = normalize(
+                    vd.position - s(u)
+                );
         return vd;
     }
 
@@ -583,17 +581,24 @@ public:
     virtual void animate(float tstart, float tend) {}
 };
 
+vec3 vec3mat4(const vec3 & v, const mat4 & m) {
+    vec4 v4 = vec4(v.x, v.y, v.z, 1);
+    v4 = v4 * m;
+    return vec3(v4.x, v4.y, v4.z);
+}
+
 struct Camera
 {
     vec3 wEye, wLookat, wVup;
     float fov, asp, fp, bp;
     Route & route;
+    Object & routeObject;
 public:
-    Camera(Route & _route) : route{_route} {
+    Camera(Route & _route, Object & _routeObject) : route{_route}, routeObject{_routeObject} {
         asp = (float) windowWidth / windowHeight;
         fov = 75.0f * (float) M_PI / 180.0f;
-        fp = 1;
-        bp = 10;
+        fp = 0.0001;
+        bp = 100;
     }
 
     mat4 V() {
@@ -619,14 +624,15 @@ public:
 
     void animate(float t) {
         const int den = 100;
-        const float l = 0.05;
+        const float l = 0.02;
         t = fmod(t, den) / den;
-        wEye = route.s(t) + route.normal(t) * l;
+        mat4 M, MInv;
+        routeObject.setModelingTransform(M, MInv);
+        wEye = vec3mat4(route.s(t) + route.normal(t) * l, M);
         wLookat = wEye + route.tangent(t);
         wVup = route.normal(t);
     }
 };
-
 
 class Scene {
     std::vector<Object *> objects;
@@ -665,17 +671,17 @@ public:
         routeObject->translation = vec3( 0, 0, 94);
         objects.push_back(routeObject);
 
-        camera = new Camera(*route);
+        camera = new Camera(*route, *routeObject);
 
         camera->wEye = vec3(0, 0, 100);
         camera->wLookat = vec3(0, 0, 94);
         camera->wVup = vec3(0, 1, 0);
 
         lights.resize(2);
-        lights[0].wLightPos = vec4(-5, 5,  110, 0);
+        lights[0].wLightPos = vec4(0, 0,  110, 0);
         lights[0].Le = vec3(0.5, 0.5, 0.5);
 
-        lights[1].wLightPos = vec4(5, -5, 110, 0);
+        lights[1].wLightPos = vec4(0, 0, 100, 0);
         lights[1].Le = vec3(0.5, 0.5, 0.5);
 
         built = true;
@@ -701,25 +707,31 @@ public:
         state.V = camera->V();
         state.P = camera->P();
         state.lights = lights;
-        state.animation = false;
+        state.animation = animation;
         for (Object * obj : objects)
             obj->draw(state);
     }
 
     void startAnimation() {
-        animation = true;
+        animation = !animation;
     }
 
     void animate(float tstart, float tend) {
-        if (animation)
-            camera->animate(tend);
+        if (animation) camera->animate(tend);
         for (unsigned int i = 0; i < lights.size(); i++) {
             lights[i].animate(tend); }
     }
 
     void addRoutePoint(vec2 && pt) {
-        printf("%f %f asas", pt.x, pt.y);
-        route->addControlPoint(pt);
+        if (!animation)
+            route->addControlPoint(pt);
+    }
+
+    void debugNormal(vec2 && pt) {
+        float h = terrain->h(pt.x, pt.y);
+        vec3 normal = terrain->normal(pt.x, pt.y);
+        printf("%f %f %f\n", pt.x, pt.y, h);
+        printf("%f %f %f\n", normal.x, normal.y, normal.z);
     }
 };
 
@@ -744,6 +756,7 @@ void onKeyboard(unsigned char key, int pX, int pY) {
 }
 
 void onKeyboardUp(unsigned char key, int pX, int pY) {
+    scene.startAnimation();
 }
 
 void onMouseMotion(
@@ -761,6 +774,7 @@ void onMouse(
         case GLUT_LEFT_BUTTON:
             if (state == GLUT_DOWN)
                 scene.addRoutePoint({cX * 5, cY * 5});
+                scene.debugNormal({cX * 5 + 5, cY * 5 + 5});
             break;
     }
 }
