@@ -40,11 +40,40 @@ struct Material {
     float shininess;
 };
 
+vec4 qmul(vec4 q1, vec4 q2) {
+    vec3 d1(q1.x, q1.y, q1.z), d2(q2.x, q2.y, q2.z);
+    vec3 helper = d2 * q1.w + d1 * q2.w + cross(d1, d2);
+    return vec4(helper.x, helper.y, helper.z, q1.w * q2.w - dot(d1, d2));
+}
+
 struct Light {
     vec3 Le;
     vec4 wLightPos;
+    vec4 animationCenter;
 
-    void animate(float t) {	}
+    void animate(float t) {
+        t/=1000;
+        vec3 position = vec3(wLightPos.x, wLightPos.y, wLightPos.z);
+        vec3 origo = vec3(animationCenter.x, animationCenter.y, animationCenter.z);
+        vec3 point = position - origo;
+        vec4 q = vec4(
+                sinf(t/4) * cosf(t) / 2,
+                sinf(t/4) * sinf(t) / 2,
+                sinf(t/4) * sqrtf(3 / 4),
+                cos(t/4)
+        );
+        float qAbs = sqrtf(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+        vec4 qInv = vec4(
+                -1 * q.x,
+                -1 * q.y,
+                -1 * q.z,
+                q.w
+                );
+        qInv = qInv / (qAbs * qAbs);
+        vec4 qr = qmul(qmul(q, vec4(point.x, point.y, point.z, 0)), qInv);
+        qr.w = 1;
+        wLightPos = qr;
+    }
 };
 
 struct RenderState {
@@ -373,7 +402,7 @@ public:
 class Route : public ParamSurface {
     std::vector<vec2> cps;
 
-    Terrain & terrain;
+    Terrain * terrain;
 
     vec2 v(const vec2 & p1, float t1, const vec2 & p2, float t2, const vec2 & p3, float t3) const {
         return ((p3 - p2) * (1 / (t3 - t2)) + ((p2 - p1) * (1 / (t2 - t1)))) * 0.5f;
@@ -469,12 +498,14 @@ class Route : public ParamSurface {
     const float r0 = 0.01f;
 
 public:
+    float lengthOfRoute = 0;
+
     vec3 s(float t) {
         vec3 position;
         vec2 position2d = r(t);
         position.x = position2d.x;
         position.y = position2d.y;
-        position.z = terrain.h(position.x + 5, position.y + 5) + h0;
+        position.z = terrain->h(position.x + 5, position.y + 5) + h0;
         return position;;
     }
 
@@ -484,14 +515,14 @@ public:
         vec2 position = r(t);
         tangentVector.x = positionDerivative.x;
         tangentVector.y = positionDerivative.y;
-        vec3 terrainNormal = terrain.normal(position.x + 5, position.y + 5);
+        vec3 terrainNormal = terrain->normal(position.x + 5, position.y + 5);
         tangentVector.z = -1 * terrainNormal.x * positionDerivative.x + -1 * terrainNormal.y * positionDerivative.y;
         return normalize(tangentVector);
     }
 
     vec3 normal(float t) {
         vec2 position = r(t);
-        return normalize(terrain.normal(position.x + 5, position.y + 5));
+        return normalize(terrain->normal(position.x + 5, position.y + 5));
     }
 
     vec3 biNormal(float t) {
@@ -513,23 +544,11 @@ public:
         return position;
     }
 
-    Route(Terrain & _terrain) :
+    Route(Terrain * _terrain) :
         terrain{_terrain} { create(10, 250); }
 
     void addControlPoint(vec2 cp) {
         cps.push_back(cp);
-    }
-
-    VertexData genVertexData(float u, float v) {
-        VertexData vd;
-        vd.position = s(u) + p(u, v);
-        vd.normal = normalize(
-                    vd.position - s(u)
-                );
-        return vd;
-    }
-
-    void draw() {
         glBindVertexArray(vao);
         glBindBuffer(GL_ARRAY_BUFFER, vbo);
 
@@ -543,7 +562,23 @@ public:
                 vtxData.push_back(genVertexData((float) j / M, (float) (i + 1) / N));
             }
         }
+        lengthOfRoute = 0;
+        for (int i = 0; i < M; i++)
+            lengthOfRoute += length(s((float) i / M) - s((float) (i + 1) / M));
         glBufferData(GL_ARRAY_BUFFER, nVtxPerStrip * nStrips * sizeof(VertexData), &vtxData[0], GL_STATIC_DRAW);
+    }
+
+    VertexData genVertexData(float u, float v) {
+        VertexData vd;
+        vd.position = s(u) + p(u, v);
+        vd.normal = normalize(
+                    vd.position - s(u)
+                );
+        return vd;
+    }
+
+    void draw() {
+        glBindVertexArray(vao);
 
         for (unsigned int i = 0; i < nStrips; i++)
             glDrawArrays(GL_TRIANGLE_STRIP, i *  nVtxPerStrip, nVtxPerStrip);
@@ -591,10 +626,10 @@ struct Camera
 {
     vec3 wEye, wLookat, wVup;
     float fov, asp, fp, bp;
-    Route & route;
-    Object & routeObject;
+    Route * route;
+    Object * routeObject;
 public:
-    Camera(Route & _route, Object & _routeObject) : route{_route}, routeObject{_routeObject} {
+    Camera(Route * _route, Object * _routeObject) : route{_route}, routeObject{_routeObject} {
         asp = (float) windowWidth / windowHeight;
         fov = 75.0f * (float) M_PI / 180.0f;
         fp = 0.0001;
@@ -623,14 +658,15 @@ public:
     }
 
     void animate(float t) {
-        const int den = 100;
+        float totalDistance = route->lengthOfRoute * 10;
+        float totalTime = totalDistance / 20;
         const float l = 0.02;
-        t = fmod(t, den) / den;
+        t = fmod(t, totalTime) / totalTime;
         mat4 M, MInv;
-        routeObject.setModelingTransform(M, MInv);
-        wEye = vec3mat4(route.s(t) + route.normal(t) * l, M);
-        wLookat = wEye + route.tangent(t);
-        wVup = route.normal(t);
+        routeObject->setModelingTransform(M, MInv);
+        wEye = vec3mat4(route->s(t) + route->normal(t) * l, M);
+        wLookat = wEye + route->tangent(t);
+        wVup = route->normal(t);
     }
 };
 
@@ -661,28 +697,31 @@ public:
         materials[1]->shininess = 100;
 
         terrain = new Terrain();
-        route = new Route(*terrain);
+        route = new Route(terrain);
 
         Object * terrainObject = new Object(shaders[0], materials[0], terrain);
-        terrainObject->translation = vec3(-5, -5, 94);
+        terrainObject->translation = vec3(-5, -5, 0);
         objects.push_back(terrainObject);
 
         Object * routeObject = new Object(shaders[1], materials[1], route);
-        routeObject->translation = vec3( 0, 0, 94);
+        routeObject->translation = vec3( 0, 0, 0);
         objects.push_back(routeObject);
 
-        camera = new Camera(*route, *routeObject);
+        camera = new Camera(route, routeObject);
 
-        camera->wEye = vec3(0, 0, 100);
-        camera->wLookat = vec3(0, 0, 94);
+        camera->wEye = vec3(0, 0, 6);
+        camera->wLookat = vec3(0, 0, 0);
         camera->wVup = vec3(0, 1, 0);
 
         lights.resize(2);
-        lights[0].wLightPos = vec4(0, 0,  110, 0);
-        lights[0].Le = vec3(0.5, 0.5, 0.5);
+        lights[0].wLightPos = vec4(0, 0,  3, 0);
+        lights[0].Le = vec3(0.7, 0.7, 0.7);
 
-        lights[1].wLightPos = vec4(0, 0, 100, 0);
-        lights[1].Le = vec3(0.5, 0.5, 0.5);
+        lights[1].wLightPos = vec4(0, 0, -5, 0);
+        lights[1].Le = vec3(0.7, 0.7, 0.7);
+
+        lights[0].animationCenter = lights[1].wLightPos;
+        lights[1].animationCenter = lights[0].wLightPos;
 
         built = true;
     }
@@ -713,25 +752,19 @@ public:
     }
 
     void startAnimation() {
-        animation = !animation;
+        animation = true;
     }
 
     void animate(float tstart, float tend) {
         if (animation) camera->animate(tend);
         for (unsigned int i = 0; i < lights.size(); i++) {
-            lights[i].animate(tend); }
+            lights[i].animate(tend);
+        }
     }
 
     void addRoutePoint(vec2 && pt) {
         if (!animation)
             route->addControlPoint(pt);
-    }
-
-    void debugNormal(vec2 && pt) {
-        float h = terrain->h(pt.x, pt.y);
-        vec3 normal = terrain->normal(pt.x, pt.y);
-        printf("%f %f %f\n", pt.x, pt.y, h);
-        printf("%f %f %f\n", normal.x, normal.y, normal.z);
     }
 };
 
@@ -752,7 +785,7 @@ void onDisplay() {
 }
 
 void onKeyboard(unsigned char key, int pX, int pY) {
-
+    scene.startAnimation();
 }
 
 void onKeyboardUp(unsigned char key, int pX, int pY) {
@@ -774,7 +807,6 @@ void onMouse(
         case GLUT_LEFT_BUTTON:
             if (state == GLUT_DOWN)
                 scene.addRoutePoint({cX * 5, cY * 5});
-                scene.debugNormal({cX * 5 + 5, cY * 5 + 5});
             break;
     }
 }
